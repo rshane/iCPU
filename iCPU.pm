@@ -783,7 +783,7 @@ sub read  {
     my $isCapability = 0;
     my $isCommand    = 0;
     my $isOption     = 0;
-    my $isANSI       = 0;
+    my $isANSI       = $self->{isANSI};
     my $isCSI        = 0;
     my $isESC        = 0;
     my $i            = 0;
@@ -993,7 +993,10 @@ my $BASIC_TEST = [
         ['CMD', 'PROMPT', 'C:.+>', 'dir'],
         ['CMD', 'PROMPT', 'C:.+>', 'exit'],
     ];
-my $instruction = ['CMD', 'PROMPT', 'C:.+>', 'dir'];
+my $instruction = $BASIC_TEST;
 
-$self->write($instruction);
 $self->read(2, 5, 2, 'C:.+>');
+$self->write(@$instruction[0]);
+$self->read(2, 5, 2, 'C:.+>');
+$self->write(@$instruction[1]);
+$self->close();
