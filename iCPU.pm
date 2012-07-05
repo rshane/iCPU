@@ -11,6 +11,7 @@ use QP::QPP::Constants;
 use QP::QPP::DB::Constants;
 use QP::QPP::Debug::Constants;
 use QP::MySQL::DBMS;
+use Time::HiRes qw(gettimeofday);
 
 use constant IAC         => 0xFF;
 use constant SB          => 0xFA;
@@ -71,37 +72,37 @@ use constant FIELDS =>
 
 
 
-    sub init_line {
-	my $param = shift;
-	my $self  = shift;
-	my $X     = $self->{X};
-	my $Y     = $self->{Y};
-	my $TERM  = $self->{TERM};
-	my ($row, $col, $diff);
-	$col = $X;
-	$diff = 80 - $col;
+sub init_line {
+    my $param = shift;
+    my $self  = shift;
+    my $X     = $self->{X};
+    my $Y     = $self->{Y};
+    my $TERM  = $self->{TERM};
+    my ($row, $col, $diff);
+    $col = $X;
+    $diff = 80 - $col;
 
-	if ($param eq '') {
-	    $row = $TERM->[$Y - 1];
-	    substr($row, $col - 1) = '`' x $diff; 
-	    $TERM->[$Y - 1] = $row;
-	    $self->{TERM} = $TERM;
-	    return $TERM;
-	}
-	if ($param eq '1') {
-	    $row = $TERM->[$Y - 1];
-	    substr($row, 0, $col - 1) = '`' x $col; 
-	    $TERM->[$Y - 1] = $row;
-	    $self->{TERM} = $TERM;
-	    return $TERM;
-	    
-	}
-	if ($param eq '2') {
-	    $TERM->[$Y - 1] = '`' x 80;
-	    $self->{TERM} = $TERM;
-	    return $TERM;
-	}
-    } 
+    if ($param eq '') {
+	$row = $TERM->[$Y - 1];
+	substr($row, $col - 1) = '`' x $diff; 
+	$TERM->[$Y - 1] = $row;
+	$self->{TERM} = $TERM;
+	return $TERM;
+    }
+    if ($param eq '1') {
+	$row = $TERM->[$Y - 1];
+	substr($row, 0, $col - 1) = '`' x $col; 
+	$TERM->[$Y - 1] = $row;
+	$self->{TERM} = $TERM;
+	return $TERM;
+	
+    }
+    if ($param eq '2') {
+	$TERM->[$Y - 1] = '`' x 80;
+	$self->{TERM} = $TERM;
+	return $TERM;
+    }
+} 
 
 
 
@@ -330,7 +331,7 @@ sub get_csi {
     my $ylast  = $self->{ylast};
     my $TERM   = $self->{TERM};
     my $isCSI  = 1;
-  
+    
     if (($char eq num2hex(0x48)) || ($char eq num2hex(0x66))) { # H|f
 	#QPD->DEBUG("CSI Cursor Position, params=($params)");
 	my ($yparam, $xparam) = split qw/;/, $params; #change - added qw
@@ -553,28 +554,28 @@ sub run_cmdline {
 } 
 
 
-    sub onScreen {
-	my $pattern = shift || return 0;
-	my $row     = shift;
-	my $TERM    = shift;
-	my $Y       = shift;
-	
-	if ($row eq 'PROMPT') {
-	    $row = $Y;
-	}
-
-	my $ubound = $row || 25;
-	my $lbound = $row || 1;
-	my $i;
-	for $i ($lbound..$ubound) {
-	    my $line = join '', $TERM->[$i - 1];
-	    if ($line =~ /$pattern/) {
-		#QPD->DEBUG("Pattern=($pattern) found at row=($row), ubound=($ubound), lbound=($lbound)");
-		return 1;
-	    }
-	}
-	return 0;
+sub onScreen {
+    my $pattern = shift || return 0;
+    my $row     = shift;
+    my $TERM    = shift;
+    my $Y       = shift;
+    
+    if ($row eq 'PROMPT') {
+	$row = $Y;
     }
+
+    my $ubound = $row || 25;
+    my $lbound = $row || 1;
+    my $i;
+    for $i ($lbound..$ubound) {
+	my $line = join '', $TERM->[$i - 1];
+	if ($line =~ /$pattern/) {
+	    #QPD->DEBUG("Pattern=($pattern) found at row=($row), ubound=($ubound), lbound=($lbound)");
+	    return 1;
+	}
+    }
+    return 0;
+}
 
 
 
@@ -759,12 +760,13 @@ sub open  {
 sub read  {
 #-----------
     my $self          = shift;
-    my $timeout       = shift;
-    my $maxiterations = shift;
-    my $minweight     = shift;
-    my $pattern       = shift;
-    my $row           = '';
+    my %args          = @_;
+    my $maxtime       = $args{maxtime};
+    my $pattern       = $args{pattern};;
+    my $row           = $args{row};
 
+    my $timeout       = $maxtime;
+    my $time;
     my $select        = $self->{select};
     my $socket        = $self->{socket};
     my $buffer;
@@ -788,13 +790,13 @@ sub read  {
     my $isESC        = 0;
     my $i            = 0;
     my $XML;
-
+    my $stop         = 0;
+    my $stime = Time::HiRes::time;
 
   SOCKET: while (1) {
-      printf "%d: looping in SOCKET\n", $i++;
       if ($select->can_read($timeout)) {
 	  $length       = sysread($socket, $buffer, 4096);      # Blocking call
-	 # $position     = sysseek($socket, 0, 1);
+	  # $position     = sysseek($socket, 0, 1);
 	  $read_attempt = 0;                              # 4096 to accomodate 80x25 screen (x2)
 	  #QPD->DEBUG("Reading buffer, length=($length)"); # 80x25 = 4000
 	  my $data      = unpack "H*", $buffer;
@@ -915,18 +917,22 @@ sub read  {
 	      #QPD->DEBUG("X=($X), Y=($Y)");
 	      
 	      last SOCKET;
-	      }
-      }
-      else {
-	  #QPD->DEBUG("Waiting for buffer, attempt=($read_attempt)");
-	  $read_attempt++;
+	  }
+	  $time = Time::HiRes::time;
+	  $timeout = $maxtime - ($time - $stime);
+	  if ($timeout <= 0) {
+	      last SOCKET;
+	  }
+	  if (($timeout > 0) && ($timeout <= .1) && !$stop) { # timeout less than 1/10 a second this is an arbitrary value
+	      $stop = 1;
+	      $timeout = .1;
+	  }
+	  elsif ($stop) {
+	      last SOCKET;
+	  }
+	  
       }
 
-      # Failsafe. No endless loops.
-      if ($read_attempt > MAX_ATTEMPT) {
-	  #QPD->DEBUG('Exceeded max attempts. Terminating.');
-	  last SOCKET;
-      }
   }
     #QPD->DEBUG('Finished Loop');
     #draw_term;
@@ -981,22 +987,48 @@ sub close  {
 sub match  {
 #-----------
 }
-#-----------
-sub chnge_timeout  {
-#-----------
-}
 
 my $self = QP::Socket::iCPU->new();
 $self->open(ADDR(), PORT());
 
 my $BASIC_TEST = [
-        ['CMD', 'PROMPT', 'C:.+>', 'dir'],
-        ['CMD', 'PROMPT', 'C:.+>', 'exit'],
+    ['CMD', 'PROMPT', 'C:.+>', 'dir'],
+    ['CMD', 'PROMPT', 'C:.+>', 'exit'],
     ];
-my $instruction = $BASIC_TEST;
 
-$self->read(2, 5, 2, 'C:.+>');
-$self->write(@$instruction[0]);
-$self->read(2, 5, 2, 'C:.+>');
-$self->write(@$instruction[1]);
+
+my  $CMD2INMASS =
+    [
+     ['CMD', 'PROMPT', 'C:.+>', "set console=''"],
+#    ['CMD', 'PROMPT', 'C:.+>', 'net use m: \\\\10.0.21.2\\bindata /user:toor Qual-ProPassword4Inmass&m:&inmass'],
+     ['CMD', 'PROMPT', 'C:.+>', 'test.bat'],
+     ['INMASS', '', 'Select company number:', '99'],
+     #['CMD', 'PROMPT', 'C:.+>', "set console=$consum"],
+     #['CMD', 'PROMPT', 'C:.+>', 'm:'],
+     #['CMD', 'PROMPT', 'M:.+>', 'inmass'],
+     #['INMASS', '', 'Select company number:', $cnum],
+     ['INMASS', '', 'Select company number:', 'ENTER'],
+     ['INMASS', '', 'Enter password', 'shonie'],
+     ['INMASS', '', 'Enter password', 'ENTER'],
+     ['INMASS', '', 'Enter Date', 'ENTER'],
+     ['INMASS', '14', '16. Exit', '16'],
+     ['INMASS', '14', '16. Exit', 'ENTER'],
+     ['CMD', '', '.', 'ENTER'],
+     ['CMD', 'PROMPT', 'M:.+>', 'exit'],
+    ];
+
+my ($instruction, %ihash);
+my $i = 0;
+foreach my $inst (@$CMD2INMASS) {
+    
+    $instruction = $CMD2INMASS;
+    %ihash = (
+	maxtime  => 5,
+	pattern  => @$instruction->[$i][2],
+	row      => @$instruction->[$i][1],    
+	);
+    $self->read(%ihash);
+    $self->write(@$instruction[$i]);
+    $i++;
+}
 $self->close();
