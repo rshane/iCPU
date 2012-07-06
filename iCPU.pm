@@ -47,6 +47,7 @@ use constant FIELDS =>
     dbms           => undef, # DBMS instance,
     dbugr          => undef, # Debugger object,
 #    debug          => 0,     # Verbosity of debug messages to print,
+    def_maxtime    => 2,
     FILE           => undef, 
     IP             => undef, # Script want to run
     isIAC          => 0,
@@ -755,13 +756,23 @@ sub open  {
 #    $TERM =  init_line('2', $self);
 }
 
-#Parameters(timeout) 
+# Parameters: optional hash containg maxtime, pattern, row
+# if maxtime set to ' ' then blocking occurs
+# if maxtime time is not set then maxtime is set to 5 unless previously changed by &chng_maxtime
+# if $timeout is less than or equal to .1 (an arbitrary decision) of a second then you will break out of SOCKET loop. 
+
 #-----------
 sub read  {
 #-----------
     my $self          = shift;
     my %args          = @_;
     my $maxtime       = $args{maxtime};
+    if (exists $args{maxtime}) {
+	$maxtime = $maxtime?$maxtime:0;
+    }
+    else{
+	$maxtime = $self->{def_maxtime};
+    }
     my $pattern       = $args{pattern};;
     my $row           = $args{row};
 
@@ -920,7 +931,7 @@ sub read  {
 	  }
 	  $time = Time::HiRes::time;
 	  $timeout = $maxtime - ($time - $stime);
-	  if ($timeout <= 0) {
+	  if (($timeout <= 0) && ($maxtime != undef) ) {
 	      last SOCKET;
 	  }
 	  if (($timeout > 0) && ($timeout <= .1) && !$stop) { # timeout less than 1/10 a second this is an arbitrary value
@@ -986,6 +997,16 @@ sub close  {
 #-----------
 sub match  {
 #-----------
+}
+
+#Parameters: maxtime
+#------------------
+sub chng_maxtime  {
+#------------------
+    my $self    = shift;
+    my $maxtime = shift;
+ 
+   $self->{def_maxtime} = $maxtime;
 }
 
 my $self = QP::Socket::iCPU->new();
