@@ -7,11 +7,14 @@ use lib '/var/www/lib';
 use QP::Socket::Base;
 use Time::HiRes qw(usleep);
 use Data::Dumper;
-use QP::QPP::Constants;
+use QP::Constants qw( :SYSLOG );
 use QP::QPP::DB::Constants;
 use QP::QPP::Debug::Constants;
+use QP::Utilities qw( :syslog );
 use QP::MySQL::DBMS;
 use Time::HiRes qw(gettimeofday);
+use Getopt::Long;
+use Pod::Usage;
 
 use constant IAC         => 0xFF;
 use constant SB          => 0xFA;
@@ -30,16 +33,14 @@ use constant TERM_SPEED  => 0x20;
 use constant TERM_TYPE   => 0x18;
 use constant WIN_SIZE    => 0x1F;
 
+use constant LOGIN       =>  "Administrator\r\n"; 
+use constant PASS        =>  'Bl$3ker.' . "\r\n";
+
 use constant SEND_DELAY  => 500000;
 use constant KEY_DELAY   => 100000;
 use constant MAX_ATTEMPT => 30;
 
-
-use constant ADDR        => '10.2.0.101'; #'10.0.21.69';
-use constant PORT        => '23';
-use constant LOGIN       => "Bobby\r\n"; #"apache\r\n";
-use constant PASS        => "windows\r\n"; #"Glavda,\r\n";
-
+#The instance vars for iCPU
 use constant FIELDS => 
 { # Hash of permitted instance variables used to automatically
     # handle getting/setting iv values via AUTOLOAD
@@ -47,7 +48,7 @@ use constant FIELDS =>
     dbms           => undef, # DBMS instance,
     dbugr          => undef, # Debugger object,
 #    debug          => 0,     # Verbosity of debug messages to print,
-    def_maxtime    => 2,
+    def_maxtime    => 3,
     FILE           => undef, 
     IP             => undef, # Script want to run
     isIAC          => 0,
@@ -58,9 +59,14 @@ use constant FIELDS =>
     isCSI          => 0,
     isESC          => 0,
     PART_NUMBER    => undef,
-    port           => undef, # Port
+    pc             => undef,
+    port           => undef, 
+    program        => undef,
+    prog_name      => undef,
+    prog_sym       => undef, 
     socket         => undef,
     select         => undef,
+    sth            => undef,
     telnet         => undef,
     TERM           => ['','','','','','','','','','','','','','','','','','','','','','','','',''],
     X              => 1,
@@ -756,10 +762,12 @@ sub open  {
 #    $TERM =  init_line('2', $self);
 }
 
-# Parameters: optional hash containg maxtime, pattern, row
-# if maxtime set to ' ' then blocking occurs
-# if maxtime time is not set then maxtime is set to 5 unless previously changed by &chng_maxtime
-# if $timeout is less than or equal to .1 (an arbitrary decision) of a second then you will break out of SOCKET loop. 
+# Parameters:  hash containg maxtime, pattern, row
+# row is optional
+# reads from the socket and checks for given pattern on terminal 
+# if maxtime set to ' ' or 0 then blocking occurs
+# if maxtime time is not set then maxtime is set to the default value in the iCPU instance  unless previously changed by &chng_maxtime
+# if $timeout is less than or equal to .1  of a second (an arbitrary decision) then you will break out of SOCKET loop. 
 
 #-----------
 sub read  {
@@ -767,6 +775,8 @@ sub read  {
     my $self          = shift;
     my %args          = @_;
     my $maxtime       = $args{maxtime};
+#if maxtime is defined and it is set to undef, then  maxtime is set to 0 else it is set to its passed in value
+#if maxtime is undefined it will be set to the default value in self->{def_maxtime}
     if (exists $args{maxtime}) {
 	$maxtime = $maxtime?$maxtime:0;
     }
@@ -807,11 +817,11 @@ sub read  {
   SOCKET: while (1) {
       if ($select->can_read($timeout)) {
 	  $length       = sysread($socket, $buffer, 4096);      # Blocking call
-	  # $position     = sysseek($socket, 0, 1);
 	  $read_attempt = 0;                              # 4096 to accomodate 80x25 screen (x2)
 	  #QPD->DEBUG("Reading buffer, length=($length)"); # 80x25 = 4000
-	  my $data      = unpack "H*", $buffer;
-	  my @chars     = $data =~ /(..)/mg;
+	  my $data       = unpack "H*", $buffer;
+	  my $ascii_data = unpack "A*", $buffer;
+	  my @chars      = $data =~ /(..)/mg;
 
 	CHAR: while ($char = shift @chars) {
 	    if ($char eq num2hex(IAC)) {
@@ -931,38 +941,43 @@ sub read  {
 	  }
 	  $time = Time::HiRes::time;
 	  $timeout = $maxtime - ($time - $stime);
-	  if (($timeout <= 0) && ($maxtime != undef) ) {
-	      last SOCKET;
+	  #print "\nTimeout: $timeout\n";
+
+	  if (($timeout <= 0) && ($maxtime != 0) ) {
+	      print "\n\nPattern: $pattern not found and timed out\n\n";
+	      return 0;
 	  }
 	  if (($timeout > 0) && ($timeout <= .1) && !$stop) { # timeout less than 1/10 a second this is an arbitrary value
 	      $stop = 1;
 	      $timeout = .1;
 	  }
 	  elsif ($stop) {
-	      last SOCKET;
+	      print "\n\nPattern: $pattern not found and timed out\n\n";
+	      return 0;
 	  }
 	  
+      }
+      else {
+	  print "\n\nPattern: $pattern not found and socket is empty\n\n";
+	  return 0;
       }
 
   }
     #QPD->DEBUG('Finished Loop');
     #draw_term;
-    return $XML;
+    return 1;
 }
 
 
 
 
-#Parameters
-#Takes in self, instruction
-# Format of Instruction = [Category, Pattern, Row, Command, Pre-exec]
+#Parameters:  self, instruction
+# Format of Instruction = [Category, Command, Pre-exec]
 #   Category : Currently only CMD or INMASS
-#   Row      : Row to search
-#   Pattern  : Regex to match
 #   Command  : DOS/INMASS Command to exec if match
 #   Pre-exec : Optional. Reference to Perl function to exec before DOS/INMASS Command.
 #              Useful for gathering results from previous Command.
-
+#writes given instruction to the socket
 #-----------
 sub write {
 #-----------
@@ -977,8 +992,6 @@ sub write {
     my $received;
     my $char;
     my $type = shift @$instruction;
-    my $row = shift @$instruction;
-    my $pattern = shift @$instruction;
     my $cmd = shift @$instruction;
     my $preexec = shift @$instruction;
     my $length;
@@ -986,6 +999,8 @@ sub write {
 
     run_cmdline($socket, $type, $cmd, $preexec); 
 }
+
+#closes the socket
 #-----------
 sub close  {
 #-----------
@@ -994,12 +1009,37 @@ sub close  {
     close $socket;
     
 }
+
+#Parameters: self, pattern, row
+#row is optional
+#Checks if a given pattern is in the terminal
+#returns 1 if the pattern is in the terminal else 0
 #-----------
 sub match  {
 #-----------
+    my $self    = shift;
+    my $pattern = shift;
+    my $row     = shift;
+    
+    if ($row eq 'PROMPT') {
+	$row = $self->{Y};
+    }
+    my $ubound = $row || 25;
+    my $lbound = $row || 1;
+    my $TERM = $self->{TERM};
+    my $i;
+  
+    for $i ($lbound..$ubound) {
+	my $line = $TERM->[$i - 1];
+	if ($line =~ /$pattern/) {
+	    return 1;
+	}
+    }
+    return 0;
 }
 
 #Parameters: maxtime
+#Changes maxtime located in the iCPU instance
 #------------------
 sub chng_maxtime  {
 #------------------
@@ -1009,47 +1049,151 @@ sub chng_maxtime  {
    $self->{def_maxtime} = $maxtime;
 }
 
-my $self = QP::Socket::iCPU->new();
-$self->open(ADDR(), PORT());
-
-my $BASIC_TEST = [
-    ['CMD', 'PROMPT', 'C:.+>', 'dir'],
-    ['CMD', 'PROMPT', 'C:.+>', 'exit'],
-    ];
-
-
-my  $CMD2INMASS =
-    [
-     ['CMD', 'PROMPT', 'C:.+>', "set console=''"],
-#    ['CMD', 'PROMPT', 'C:.+>', 'net use m: \\\\10.0.21.2\\bindata /user:toor Qual-ProPassword4Inmass&m:&inmass'],
-     ['CMD', 'PROMPT', 'C:.+>', 'test.bat'],
-     ['INMASS', '', 'Select company number:', '99'],
-     #['CMD', 'PROMPT', 'C:.+>', "set console=$consum"],
-     #['CMD', 'PROMPT', 'C:.+>', 'm:'],
-     #['CMD', 'PROMPT', 'M:.+>', 'inmass'],
-     #['INMASS', '', 'Select company number:', $cnum],
-     ['INMASS', '', 'Select company number:', 'ENTER'],
-     ['INMASS', '', 'Enter password', 'shonie'],
-     ['INMASS', '', 'Enter password', 'ENTER'],
-     ['INMASS', '', 'Enter Date', 'ENTER'],
-     ['INMASS', '14', '16. Exit', '16'],
-     ['INMASS', '14', '16. Exit', 'ENTER'],
-     ['CMD', '', '.', 'ENTER'],
-     ['CMD', 'PROMPT', 'M:.+>', 'exit'],
-    ];
-
-my ($instruction, %ihash);
-my $i = 0;
-foreach my $inst (@$CMD2INMASS) {
-    
-    $instruction = $CMD2INMASS;
-    %ihash = (
-	maxtime  => 5,
-	pattern  => @$instruction->[$i][2],
-	row      => @$instruction->[$i][1],    
-	);
-    $self->read(%ihash);
-    $self->write(@$instruction[$i]);
-    $i++;
+#Parameters: a Program, which is an array of Instructions
+#Each Instruction is of the form [\$cond, \&act, \&oact]
+#A condition can either return 0,  1, or it can die,  based off if the pattern is found in the terminal
+#0 = pattern not found, 1 = pattern found
+#An action can either return undef, a whole number (0,1,2...), or die
+#If the return value of action is undef then the pc will increment to the next value
+#If the return value is a whole numer then the pc is set to that number
+#Other action behaves the exact same as action
+#If condition, action, or other action die a syslog report is generated and the program dies 
+#--------
+sub run {
+#--------
+    my $self = shift;
+    my $program     = $self->{program};
+    my @program     = @$program;
+    my $prog_size   = scalar(@program);
+    my $pc          = 0;
+    my ($cond_val, $act_val, $o_act_val);
+    while ($pc <= ($prog_size - 1)) {
+	my $cond    = @program[$pc]->[0];
+	my $act     = @program[$pc]->[1];
+	my $o_act   = @program[$pc]->[2];
+	$self->{pc} = $pc;
+	my $temp_pc = undef;
+	
+	eval { $cond_val = &$cond($self); };
+	if ($@) {
+	    my $prog_name = $self->{prog_name};
+	    my $message = sprintf("Condition died at Instruction %d  within %s located in %s", $pc, $self->{prog_sym}, $self->{prog_name});
+	    syslog($message, SYSLOG_LEVEL_ERR);
+	    die "\nCondition error check SysLog for more details\n";
+	}
+	if ($cond_val) {
+	    eval { $temp_pc =  &$act($self);};
+	    if ($@) {
+		my $prog_name = $self->{prog_name};
+		my $message = sprintf("Action died at Instruction %d  within %s located in %s", $pc, $self->{prog_sym}, $self->{prog_name});
+		syslog($message, SYSLOG_LEVEL_ERR);
+		die "\nError occured in Action check SysLog for more details\n";
+	    }
+	}
+	else {
+	    eval {$temp_pc =  &$o_act($self);};
+	    if ($@) {
+		my $prog_name = $self->{prog_name};
+		my $message = sprintf("Other Action died at Instruction %d  within %s located in %s", $pc, $self->{prog_sym}, $self->{prog_name});
+		syslog($message, SYSLOG_LEVEL_ERR);
+		die "\nError occured in Other_action cicheck SysLog for more details\n";
+	    }
+	}
+	$pc = defined( $temp_pc ) ? ($temp_pc - 1) : $pc;
+	$pc++;
+    }
 }
-$self->close();
+
+1;
+
+
+__END__
+    
+=head1 NAME
+
+iCPU.pm - Qual-Pro Instruction CPU
+
+=head1 SYNOPSIS
+B<iCPU.pm> B<read>
+
+=over 2
+
+Parameters:  hash containg maxtime, pattern, row.
+row is optional.
+reads from the socket and checks for given pattern on terminal .
+if maxtime set to '' or 0 then blocking occurs.
+if maxtime time is not set then maxtime is set to the default value in the iCPU instance  unless previously changed by &chng_maxtime.
+if $timeout is less than or equal to .1  of a second (an arbitrary decision) then you will break out of SOCKET loop. 
+
+=back
+
+B<iCPU.pm> B<help> [B<read> | B<write> | B<close> | B<match> | B<chng_maxtime> | B<run>]
+
+=over 2
+
+Display this general command documentation listing the catagories currently 
+supported.  If an optional argument follows, it is the operation type for 
+which detailed help will be provided.
+
+=back
+
+B<iCPU.pm> B<write>
+
+=over 2
+
+Parameters:  self, instruction
+Format of Instruction = [Category, Command, Pre-exec]
+   Category : Currently only CMD or INMASS
+   Command  : DOS/INMASS Command to exec if match
+   Pre-exec : Optional. Reference to Perl function to exec
+              before DOS/INMASS Command.
+              Useful for gathering results from previous Command.
+Writes given instruction to the socket.
+
+=back
+
+B<iCPU.pm> B<close>
+
+=over 2
+
+Closes the socket
+
+=back
+
+B<iCPU.pm> B<match>
+
+=over 2
+
+Parameters: self, pattern, row
+row is optional.
+Checks if a given pattern is in the terminal.
+returns 1 if the pattern is in the terminal else 0.
+
+=back
+
+B<iCPU.pm> B<chng_maxtime>
+ 
+=over 2
+
+Parameters: maxtime
+Changes maxtime located in the iCPU instance.
+
+=back
+
+B<iCPU.pm> B<run>
+
+=over 2
+
+Parameters: a Program, which is an array of Instructions
+Each Instruction is of the form [\$cond, \&act, \&oact].
+A condition can either return 0,  1, or it can die,  based off if the pattern is found in the terminal.
+0 = pattern not found, 1 = pattern found.
+An action can either return undef, a whole number (0,1,2...), or die.
+If the return value of action is undef then the pc will increment to the next value.
+If the return value is a whole numer then the pc is set to that number.
+Other action behaves the exact same as action.
+If condition, action, or other action die a syslog report is generated and the program dies.
+
+=back
+
+=cut
