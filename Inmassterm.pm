@@ -695,6 +695,7 @@ sub sock_session {
 	  $read_attempt = 0;                              # 4096 to accomodate 80x25 screen (x2) 
 	  #QPD->DEBUG("Reading buffer, length=($length)"); # 80x25 = 4000 
 	  my $data = unpack "H*", $buffer; 
+	  my $ascii_data = unpack "A*", $buffer;
 	  my @chars = $data =~ /(..)/mg; 
 
 	CHAR: while ($char = shift @chars) { 
